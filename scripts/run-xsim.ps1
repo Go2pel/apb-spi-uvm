@@ -9,7 +9,8 @@ if (-not $VivadoBin) {
 $VivadoBin = (Resolve-Path -LiteralPath $VivadoBin).Path
 $project = Split-Path -Parent $PSScriptRoot
 $build = Join-Path ([System.IO.Path]::GetTempPath()) ('apb-spi-uvm-' + [guid]::NewGuid().ToString('N'))
-$sources = @('rtl/spi_mode0_byte.sv', 'rtl/apb_spi.sv', 'tb/apb_spi_smoke.sv')
+$sources = @('rtl/spi_fifo.sv', 'rtl/spi_mode0_frame.sv', 'rtl/apb_spi.sv', 'tb/apb_spi_smoke.sv')
+$sourceNames = $sources | ForEach-Object { Split-Path -Leaf $_ }
 
 New-Item -ItemType Directory -Path $build | Out-Null
 foreach ($source in $sources) {
@@ -19,7 +20,7 @@ foreach ($source in $sources) {
 Write-Host "Build and logs: $build"
 Push-Location -LiteralPath $build
 try {
-    & (Join-Path $VivadoBin 'xvlog.bat') -sv spi_mode0_byte.sv apb_spi.sv apb_spi_smoke.sv
+    & (Join-Path $VivadoBin 'xvlog.bat') -sv @sourceNames
     if ($LASTEXITCODE -ne 0) { throw "xvlog failed with exit code $LASTEXITCODE" }
 
     & (Join-Path $VivadoBin 'xelab.bat') apb_spi_smoke -s apb_spi_smoke_sim
