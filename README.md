@@ -1,6 +1,6 @@
 # APB3 SPI Controller and UVM Verification
 
-SystemVerilog learning project for a memory-mapped SPI host and its verification. The controller supports SPI Mode 0 and FIFO-backed frames of one to four bytes. The current testbench is self-checking. The UVM environment is a later milestone.
+SystemVerilog learning project for a memory-mapped SPI host and its verification. The controller supports SPI Mode 0 and FIFO-backed frames of one to four bytes. The repository includes a directed SystemVerilog smoke test and a UVM end-to-end regression.
 
 ## Register interface
 
@@ -30,10 +30,21 @@ On Windows, use Vivado Simulator from PowerShell. Supply the Vivado `bin` direct
 
 The script prints the build and log directory. A successful run ends with `PASS apb_spi_smoke`. The SPI device model checks pin data, the SCK period and chip select independently. The test covers single-byte register accesses, two- and four-byte FIFO frames, rejection of insufficient TX or RX capacity, full and empty FIFO errors, pointer wraparound, simultaneous push and pop, and reset during a frame.
 
-## Next milestones
+## Run the UVM regression
 
-1. Build a UVM APB agent and an independent SPI monitor. Connect both monitors to an end-to-end scoreboard.
-2. Add protocol assertions, seeded regressions and functional coverage.
+On Linux or WSL, use Verilator 5.052 or newer and the [Accellera UVM 2020.3.2 reference implementation](https://www.accellera.org/downloads/standards/uvm). Set `UVM_HOME` to the extracted directory that contains `src/uvm_pkg.sv`. The runner uses `verilator` from `PATH` unless `VERILATOR` is set.
+
+```sh
+UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
+```
+
+The APB agent drives transactions and independently observes completed transfers. A separate SPI monitor reconstructs MOSI and MISO bytes from the pins. The scoreboard predicts MOSI from accepted APB writes and checks APB receive reads against observed MISO. It also checks frame boundaries, `BUSY` and `DONE`. The sequence checks expected `PSLVERR` responses.
+
+The directed run checks five frames and eleven bytes across register mode and all four FIFO lengths. A successful run prints `PASS apb_spi_uvm`, with logs in `build/uvm/`. The runner compiles with `UVM_NO_DPI` since the test uses no DPI features. The UVM run resets before stimulus. The standalone smoke test covers reset during a frame and simultaneous FIFO push and pop.
+
+## Next milestone
+
+Add protocol assertions, seeded regressions and functional coverage.
 
 For the first exercise, draw the APB write of `TXDATA` and the SPI rising edge that samples bit 7 of `0xa6`. Then trace why the second `START` write produces `PSLVERR` while the first byte still reaches the SPI device.
 
