@@ -78,6 +78,15 @@ module apb_spi_uvm_tb;
     end
 
     initial begin
+        string trace_path;
+
+        if ($value$plusargs("vcd=%s", trace_path)) begin
+            $dumpfile(trace_path);
+            $dumpvars(0, apb_spi_uvm_tb);
+        end
+    end
+
+    initial begin
         #500000;
         $fatal(1, "UVM testbench watchdog expired");
     end

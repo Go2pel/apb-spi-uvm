@@ -49,6 +49,14 @@ RANDOM_FRAMES=0 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
 
 A successful run prints `PASS apb_spi_uvm`. Logs and Verilator coverage data go to `build/uvm/`, with one pair of files per run. The runner compiles with `UVM_NO_DPI`.
 
+To capture a waveform for the directed run, use:
+
+```sh
+TRACE=1 RANDOM_FRAMES=0 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
+```
+
+Open `build/uvm/sim.vcd` in a VCD viewer. See the [worked walkthrough](docs/walkthrough.md) for the exact FIFO rejection and retry sequence, what to inspect on the waveform, and how the scoreboard checks it.
+
 | Scenario | Where | What the test checks |
 | --- | --- | --- |
 | Register mode and 1–4 byte FIFO frames | Smoke and UVM | MOSI and RX readback order, frame boundaries, and completion status. The UVM test exercises all four FIFO lengths. |
@@ -63,8 +71,6 @@ Both testbenches instantiate protocol assertions for the APB setup-to-access tra
 For a representative run with Verilator 5.054, `RANDOM_FRAMES=128` and seed `99`, the scoreboard checked 136 completed frames, 236 bytes and one reset abort. The run hit all defined functional bins and reported zero UVM errors and fatals. Repeating seed `17` with 24 random frames produced identical coverage data.
 
 To debug a rejected START, first inspect `PSEL`, `PENABLE`, `PREADY` and `PSLVERR` at the APB completion edge. Compare `FIFO_LEVEL` and `STATUS.DONE` before and after the request. On the retry, compare the SPI MOSI bytes with the original TX writes and check that RX reads return the old bytes before the new ones.
-
-For the first exercise, draw the APB write of `TXDATA` and the SPI rising edge that samples bit 7 of `0xa6`. Then trace why the second `START` write produces `PSLVERR` while the first byte still reaches the SPI device.
 
 References: [Arm AMBA specifications](https://www.arm.com/architecture/system-architectures/amba/amba-specifications), [Nandland SPI Master](https://github.com/nandland/spi-master), [OpenTitan SPI host verification](https://opentitan.org/book/hw/ip/spi_host/dv/index.html).
 
