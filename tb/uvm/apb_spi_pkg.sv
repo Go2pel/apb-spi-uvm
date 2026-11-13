@@ -22,6 +22,7 @@ package apb_spi_pkg;
         logic [7:0]  addr;
         logic [31:0] data;
         logic        error;
+        time         completed_at;
 
         function new(string name = "apb_item");
             super.new(name);
@@ -104,6 +105,7 @@ package apb_spi_pkg;
                     item.addr     = bus.paddr;
                     item.data     = bus.pwrite ? bus.pwdata : bus.prdata;
                     item.error    = bus.pslverr;
+                    item.completed_at = $time;
                     observed.write(item);
                 end
             end
@@ -224,6 +226,8 @@ package apb_spi_pkg;
         int frames_checked;
         int bytes_checked;
         int frames_aborted;
+        time last_rx_read_at;
+        bit last_rx_read_empty;
 
         covergroup frame_coverage with function sample(bit use_fifo, int length);
             option.per_instance = 1;
@@ -255,6 +259,14 @@ package apb_spi_pkg;
             }
         endgroup
 
+        covergroup rx_overlap_coverage with function sample(bit empty_before_edge);
+            option.per_instance = 1;
+            rx_level_cp: coverpoint empty_before_edge {
+                bins had_queued_data = {0};
+                bins was_empty = {1};
+            }
+        endgroup
+
         function new(string name, uvm_component parent);
             super.new(name, parent);
             apb_in = new("apb_in", this);
@@ -262,6 +274,7 @@ package apb_spi_pkg;
             frame_coverage = new();
             error_coverage = new();
             start_coverage = new();
+            rx_overlap_coverage = new();
         endfunction
 
         function void build_phase(uvm_phase phase);
@@ -284,6 +297,7 @@ package apb_spi_pkg;
                 fifo_mode = 0;
                 done = 0;
                 frame_length = 0;
+                last_rx_read_at = 0;
             end
         endtask
 
@@ -326,6 +340,30 @@ package apb_spi_pkg;
             start_frame(use_fifo, length);
         endfunction
 
+        function void check_rx_read(apb_item item);
+            bit empty_before_edge = (expected_rx_fifo.size() == 0);
+            logic [31:0] expected;
+
+            if (item.error !== empty_before_edge) begin
+                `uvm_error("RX_READ",
+                           $sformatf("RXFIFO read with pre-edge occupancy %0d: expected PSLVERR=%b, got %b",
+                                     expected_rx_fifo.size(), empty_before_edge, item.error))
+                return;
+            end
+
+            last_rx_read_at = item.completed_at;
+            last_rx_read_empty = empty_before_edge;
+            if (empty_before_edge) begin
+                error_coverage.sample(RX_EMPTY);
+                return;
+            end
+
+            expected = {24'b0, expected_rx_fifo.pop_front()};
+            if (item.data !== expected)
+                `uvm_error("RX_READ", $sformatf("Expected queued RX byte %02h, got %08h",
+                                                 expected[7:0], item.data))
+        endfunction
+
         function void write_apb(apb_item item);
             logic [31:0] expected;
 
@@ -333,13 +371,15 @@ package apb_spi_pkg;
                 check_start(item);
                 return;
             end
+            if (!item.is_write && item.addr == RXFIFO) begin
+                check_rx_read(item);
+                return;
+            end
 
             if (item.error === 1'b1) begin
                 case (item.addr)
                     TXFIFO: if (item.is_write && tx_queue.size() == FIFO_DEPTH)
                                 error_coverage.sample(TX_FULL);
-                    RXFIFO: if (!item.is_write && expected_rx_fifo.size() == 0)
-                                error_coverage.sample(RX_EMPTY);
                     default: ;
                 endcase
                 return;
@@ -356,13 +396,6 @@ package apb_spi_pkg;
                     RXDATA: expected = {24'b0, last_rx_register};
                     STATUS: expected = {30'b0, done, frame_active};
                     FIFO_LEVEL: expected = (expected_rx_fifo.size() << 4) | tx_queue.size();
-                    RXFIFO: begin
-                        if (expected_rx_fifo.size() == 0) begin
-                            `uvm_error("SCOREBOARD", "APB accepted an empty RXFIFO read")
-                            return;
-                        end
-                        expected = {24'b0, expected_rx_fifo.pop_front()};
-                    end
                     default: return;
                 endcase
                 if (item.data !== expected)
@@ -402,6 +435,9 @@ package apb_spi_pkg;
                                                     expected, sample.mosi))
             frame_miso = sample.miso;
             if (fifo_mode) begin
+                // APB is sampled at PCLK before the registered SCK fall publishes this byte.
+                if (last_rx_read_at == $time)
+                    rx_overlap_coverage.sample(last_rx_read_empty);
                 expected_rx_fifo.push_back(sample.miso);
                 // The next queued byte is loaded on the same falling edge as RX push.
                 if (expected_mosi.size() != 0) void'(tx_queue.pop_front());
@@ -416,6 +452,7 @@ package apb_spi_pkg;
                 `uvm_error("SCOREBOARD", "Transactions remained pending at end of test")
             if (frame_coverage.get_inst_coverage() < 100.0 ||
                 start_coverage.get_inst_coverage() < 100.0 ||
+                rx_overlap_coverage.get_inst_coverage() < 100.0 ||
                 error_coverage.get_inst_coverage() < 100.0)
                 `uvm_error("SCOREBOARD", "Required functional coverage bins were not all hit")
         endfunction
@@ -427,6 +464,9 @@ package apb_spi_pkg;
                                 frame_coverage.get_inst_coverage(),
                                 start_coverage.get_inst_coverage(),
                                 error_coverage.get_inst_coverage()), UVM_LOW)
+            `uvm_info("RX_OVERLAP_COVERAGE",
+                      $sformatf("Same-edge APB read and SPI RX push: %0.1f%%",
+                                rx_overlap_coverage.get_inst_coverage()), UVM_LOW)
         endfunction
     endclass
 
@@ -569,6 +609,29 @@ package apb_spi_pkg;
             check_read(FIFO_LEVEL, '0);
         endtask
 
+        task check_rx_read_on_byte_arrival();
+            logic [31:0] ignored;
+
+            access(1, TXFIFO, 32'h76, 0, ignored);
+            access(1, TXFIFO, 32'hc1, 0, ignored);
+            access(1, CTRL, 32'hb, 0, ignored);
+
+            repeat (8) @(posedge spi_bus.sck);
+            // Two PCLK edges plus the driver's two-cycle setup/access launch
+            // put the APB completion on the eighth falling SCK edge.
+            repeat (2) @(posedge apb_bus.pclk);
+            access(0, RXFIFO, '0, 1, ignored);
+            check_read(FIFO_LEVEL, 32'h10);
+
+            repeat (8) @(posedge spi_bus.sck);
+            repeat (2) @(posedge apb_bus.pclk);
+            access(0, RXFIFO, '0, 0, ignored);
+            check_read(FIFO_LEVEL, 32'h10);
+            wait_for_done();
+            access(0, RXFIFO, '0, 0, ignored);
+            check_read(FIFO_LEVEL, '0);
+        endtask
+
         task drain_frame(input bit use_fifo, input int length);
             logic [31:0] ignored;
 
@@ -624,6 +687,7 @@ package apb_spi_pkg;
 
             check_rx_space_retry();
             check_reset_recovery();
+            check_rx_read_on_byte_arrival();
             run_random_frames();
         endtask
     endclass
@@ -661,11 +725,11 @@ package apb_spi_pkg;
 
         function void check_phase(uvm_phase phase);
             super.check_phase(phase);
-            if (env.scoreboard.frames_checked != 8 + random_frames ||
-                env.scoreboard.bytes_checked != 18 + random_bytes ||
+            if (env.scoreboard.frames_checked != 9 + random_frames ||
+                env.scoreboard.bytes_checked != 20 + random_bytes ||
                 env.scoreboard.frames_aborted != 1)
                 `uvm_error("TEST", $sformatf("Expected %0d frames, %0d bytes and one reset abort; observed %0d, %0d and %0d",
-                                             8 + random_frames, 18 + random_bytes,
+                                             9 + random_frames, 20 + random_bytes,
                                              env.scoreboard.frames_checked,
                                              env.scoreboard.bytes_checked,
                                              env.scoreboard.frames_aborted))

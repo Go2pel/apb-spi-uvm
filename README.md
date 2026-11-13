@@ -40,7 +40,7 @@ UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
 
 The APB agent drives transactions and independently observes completed transfers. A separate SPI monitor reconstructs MOSI and MISO bytes from the pins. The scoreboard predicts MOSI from accepted APB writes and checks APB receive reads against observed MISO. It also checks frame boundaries, `BUSY` and `DONE`. The sequence checks expected `PSLVERR` responses.
 
-The directed run checks eight completed frames, eighteen observed bytes (including one byte before an abort), and one reset abort. The runner repeats the directed tests and adds 24 randomized frames per seed for seeds 1, 17 and 42. Random stimulus varies register or FIFO mode, FIFO length, MOSI payload and MISO response. To reproduce one seed or run only the directed test, use:
+The directed run checks nine completed frames, twenty observed bytes (including one byte before an abort), and one reset abort. The runner repeats the directed tests and adds 24 randomized frames per seed for seeds 1, 17 and 42. Random stimulus varies register or FIFO mode, FIFO length, MOSI payload and MISO response. To reproduce one seed or run only the directed test, use:
 
 ```sh
 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh 17
@@ -64,11 +64,12 @@ The waveform is written to `build/uvm/sim.vcd`.
 | Insufficient RX space | Smoke and UVM | Rejected START preserves FIFO levels and prior DONE. |
 | Exact-fit retry with unread RX data | UVM | Reading one old byte makes the retry legal. The scoreboard checks the remaining old bytes followed by the new RX bytes. |
 | Reset during an active frame | Smoke and UVM | SPI pins return to idle and registers and FIFOs clear. The UVM scoreboard discards pending data, counts the abort and checks the first frame after reset. |
-| FIFO pointer wraparound and same-edge RX push/pop | Smoke | FIFO ordering and occupancy across pointer wrap and concurrent operations. |
+| FIFO pointer wraparound | Smoke | FIFO ordering and occupancy across pointer wrap. |
+| APB RX read on the SPI byte-arrival edge | Smoke and UVM | With queued data, the read returns the oldest byte while the new byte is enqueued. The UVM test also requires an error when the FIFO is empty before that edge and checks that the arriving byte remains readable. |
 
-Both testbenches instantiate protocol assertions for the APB setup-to-access transition, zero-wait completion, error timing and SPI Mode 0 pin behavior. The UVM test requires every defined functional coverage bin to be hit. The bins cover completed frame modes and FIFO lengths, accepted FIFO starts with exact or excess RX space, and five APB error causes. The scoreboard evaluates START using occupancy and busy state at the APB completion edge, before any state updates caused by the transfer.
+Both testbenches instantiate protocol assertions for the APB setup-to-access transition, zero-wait completion, error timing and SPI Mode 0 pin behavior. The UVM test requires every defined functional coverage bin to be hit. The bins cover completed frame modes and FIFO lengths, accepted FIFO starts with exact or excess RX space, five APB error causes, and same-edge RX reads with an empty or nonempty FIFO. The same-edge bins require the APB read completion and the SPI byte arrival to have the same simulation timestamp. The scoreboard predicts the APB response from the FIFO state before that edge.
 
-For a representative run with Verilator 5.054, `RANDOM_FRAMES=128` and seed `99`, the scoreboard checked 136 completed frames, 236 bytes and one reset abort. The run hit all defined functional bins and reported zero UVM errors and fatals. Repeating seed `17` with 24 random frames produced identical coverage data.
+For a representative run with Verilator 5.054, `RANDOM_FRAMES=128` and seed `99`, the scoreboard checked 137 completed frames, 258 bytes and one reset abort. The run hit all defined functional bins and reported zero UVM errors and fatals. Repeating seed `17` with 24 random frames produced identical coverage data.
 
 References: [Arm AMBA specifications](https://www.arm.com/architecture/system-architectures/amba/amba-specifications), [Nandland SPI Master](https://github.com/nandland/spi-master), [OpenTitan SPI host verification](https://opentitan.org/book/hw/ip/spi_host/dv/index.html).
 
