@@ -10,8 +10,10 @@ package apb_spi_pkg;
     localparam logic [7:0] RXDATA = 8'h0c;
     localparam logic [7:0] TXFIFO = 8'h10;
     localparam logic [7:0] RXFIFO = 8'h14;
+    localparam logic [7:0] FIFO_LEVEL = 8'h18;
+    localparam int FIFO_DEPTH = 4;
     typedef logic [7:0] spi_byte_t;
-    typedef enum {BUSY_START, FIFO_START, TX_FULL, RX_EMPTY} apb_error_t;
+    typedef enum {START_OK, BUSY_START, TX_SHORT, RX_SHORT, TX_FULL, RX_EMPTY} apb_result_t;
 
     class apb_item extends uvm_sequence_item;
         `uvm_object_utils(apb_item)
@@ -171,16 +173,16 @@ package apb_spi_pkg;
                 miso_shift = '0;
                 bit_count = 0;
 
-                while (!bus.cs_n) begin
-                    @(posedge bus.sck or posedge bus.cs_n);
-                    if (bus.cs_n) break;
+                while (!bus.cs_n && bus.preset_n) begin
+                    @(posedge bus.sck or posedge bus.cs_n or negedge bus.preset_n);
+                    if (bus.cs_n || !bus.preset_n) break;
                     mosi_shift = {mosi_shift[6:0], bus.mosi};
                     miso_shift = {miso_shift[6:0], bus.miso};
                     bit_count++;
 
                     // The DUT makes a byte available to APB on the eighth falling edge.
-                    @(negedge bus.sck or posedge bus.cs_n);
-                    if (bus.cs_n) break;
+                    @(negedge bus.sck or posedge bus.cs_n or negedge bus.preset_n);
+                    if (bus.cs_n || !bus.preset_n) break;
                     if (bit_count == 8) begin
                         sample = new();
                         sample.mosi = mosi_shift;
@@ -190,6 +192,7 @@ package apb_spi_pkg;
                     end
                 end
 
+                if (!bus.preset_n) continue;
                 if (bit_count != 0)
                     `uvm_error("SPI_MONITOR", "Chip select rose before a byte completed")
                 sample = new();
@@ -207,6 +210,7 @@ package apb_spi_pkg;
 
         uvm_analysis_imp_apb #(apb_item, apb_spi_scoreboard) apb_in;
         uvm_analysis_imp_spi #(spi_sample, apb_spi_scoreboard) spi_in;
+        virtual apb_if bus;
         spi_byte_t tx_queue[$];
         spi_byte_t expected_mosi[$];
         spi_byte_t expected_rx_fifo[$];
@@ -219,6 +223,7 @@ package apb_spi_pkg;
         int frame_length;
         int frames_checked;
         int bytes_checked;
+        int frames_aborted;
 
         covergroup frame_coverage with function sample(bit use_fifo, int length);
             option.per_instance = 1;
@@ -231,9 +236,23 @@ package apb_spi_pkg;
             }
         endgroup
 
-        covergroup error_coverage with function sample(apb_error_t reason);
+        covergroup error_coverage with function sample(apb_result_t reason);
             option.per_instance = 1;
-            reason_cp: coverpoint reason;
+            reason_cp: coverpoint reason {
+                bins busy_start = {BUSY_START};
+                bins tx_short = {TX_SHORT};
+                bins rx_short = {RX_SHORT};
+                bins tx_full = {TX_FULL};
+                bins rx_empty = {RX_EMPTY};
+            }
+        endgroup
+
+        covergroup start_coverage with function sample(bit exact_fit);
+            option.per_instance = 1;
+            rx_space_cp: coverpoint exact_fit {
+                bins extra_space = {0};
+                bins exact_fit = {1};
+            }
         endgroup
 
         function new(string name, uvm_component parent);
@@ -242,39 +261,85 @@ package apb_spi_pkg;
             spi_in = new("spi_in", this);
             frame_coverage = new();
             error_coverage = new();
+            start_coverage = new();
         endfunction
 
-        function void start_frame(logic [31:0] control);
-            if (frame_active) begin
-                `uvm_error("SCOREBOARD", "APB accepted START during an active frame")
-                return;
-            end
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            if (!uvm_config_db#(virtual apb_if)::get(this, "", "apb_bus", bus))
+                `uvm_fatal("SCOREBOARD", "APB interface was not configured")
+        endfunction
 
-            fifo_mode = control[3];
-            frame_length = fifo_mode ? int'(control[2:1]) + 1 : 1;
+        task run_phase(uvm_phase phase);
+            forever begin
+                @(negedge bus.preset_n);
+                if (frame_active) frames_aborted++;
+                tx_queue.delete();
+                expected_mosi.delete();
+                expected_rx_fifo.delete();
+                tx_register = '0;
+                last_rx_register = '0;
+                frame_miso = '0;
+                frame_active = 0;
+                fifo_mode = 0;
+                done = 0;
+                frame_length = 0;
+            end
+        endtask
+
+        function void start_frame(bit use_fifo, int length);
+            fifo_mode = use_fifo;
+            frame_length = length;
             frame_active = 1;
             done = 0;
             if (fifo_mode) begin
-                if (tx_queue.size() < frame_length) begin
-                    `uvm_error("SCOREBOARD", "APB accepted START with too few queued bytes")
-                    return;
-                end
-                repeat (frame_length)
-                    expected_mosi.push_back(tx_queue.pop_front());
+                for (int index = 0; index < length; index++)
+                    expected_mosi.push_back(tx_queue[index]);
+                void'(tx_queue.pop_front());
             end else begin
                 expected_mosi.push_back(tx_register);
             end
         endfunction
 
+        function void check_start(apb_item item);
+            apb_result_t result = START_OK;
+            bit use_fifo = item.data[3];
+            int length = use_fifo ? int'(item.data[2:1]) + 1 : 1;
+            int rx_free = FIFO_DEPTH - expected_rx_fifo.size();
+
+            // The APB monitor calls this at the completion edge, before the SPI updates.
+            if (frame_active) result = BUSY_START;
+            else if (use_fifo && tx_queue.size() < length) result = TX_SHORT;
+            else if (use_fifo && rx_free < length) result = RX_SHORT;
+
+            if (item.error !== (result != START_OK)) begin
+                `uvm_error("SCOREBOARD",
+                           $sformatf("START len=%0d TX=%0d RX free=%0d: expected %s, got PSLVERR=%b",
+                                     length, tx_queue.size(), rx_free, result.name(), item.error))
+                return;
+            end
+            if (result != START_OK) begin
+                error_coverage.sample(result);
+                return;
+            end
+            if (use_fifo) start_coverage.sample(rx_free == length);
+            start_frame(use_fifo, length);
+        endfunction
+
         function void write_apb(apb_item item);
             logic [31:0] expected;
 
+            if (item.is_write && item.addr == CTRL && item.data[0]) begin
+                check_start(item);
+                return;
+            end
+
             if (item.error === 1'b1) begin
                 case (item.addr)
-                    CTRL:   if (item.is_write && item.data[0])
-                                error_coverage.sample(frame_active ? BUSY_START : FIFO_START);
-                    TXFIFO: if (item.is_write) error_coverage.sample(TX_FULL);
-                    RXFIFO: if (!item.is_write) error_coverage.sample(RX_EMPTY);
+                    TXFIFO: if (item.is_write && tx_queue.size() == FIFO_DEPTH)
+                                error_coverage.sample(TX_FULL);
+                    RXFIFO: if (!item.is_write && expected_rx_fifo.size() == 0)
+                                error_coverage.sample(RX_EMPTY);
                     default: ;
                 endcase
                 return;
@@ -283,7 +348,6 @@ package apb_spi_pkg;
                 case (item.addr)
                     TXDATA: tx_register = item.data[7:0];
                     TXFIFO: tx_queue.push_back(item.data[7:0]);
-                    CTRL:   if (item.data[0]) start_frame(item.data);
                     default: ;
                 endcase
             end else begin
@@ -291,6 +355,7 @@ package apb_spi_pkg;
                     TXDATA: expected = {24'b0, tx_register};
                     RXDATA: expected = {24'b0, last_rx_register};
                     STATUS: expected = {30'b0, done, frame_active};
+                    FIFO_LEVEL: expected = (expected_rx_fifo.size() << 4) | tx_queue.size();
                     RXFIFO: begin
                         if (expected_rx_fifo.size() == 0) begin
                             `uvm_error("SCOREBOARD", "APB accepted an empty RXFIFO read")
@@ -336,8 +401,11 @@ package apb_spi_pkg;
                 `uvm_error("SCOREBOARD", $sformatf("MOSI: expected %02h, got %02h",
                                                     expected, sample.mosi))
             frame_miso = sample.miso;
-            if (fifo_mode)
+            if (fifo_mode) begin
                 expected_rx_fifo.push_back(sample.miso);
+                // The next queued byte is loaded on the same falling edge as RX push.
+                if (expected_mosi.size() != 0) void'(tx_queue.pop_front());
+            end
             bytes_checked++;
         endfunction
 
@@ -346,13 +414,18 @@ package apb_spi_pkg;
             if (frame_active || expected_mosi.size() != 0 || tx_queue.size() != 0 ||
                 expected_rx_fifo.size() != 0)
                 `uvm_error("SCOREBOARD", "Transactions remained pending at end of test")
+            if (frame_coverage.get_inst_coverage() < 100.0 ||
+                start_coverage.get_inst_coverage() < 100.0 ||
+                error_coverage.get_inst_coverage() < 100.0)
+                `uvm_error("SCOREBOARD", "Required functional coverage bins were not all hit")
         endfunction
 
         function void report_phase(uvm_phase phase);
             super.report_phase(phase);
             `uvm_info("FUNCTIONAL_COVERAGE",
-                      $sformatf("Frame modes and lengths: %0.1f%%, APB errors: %0.1f%%",
+                      $sformatf("Frame modes and lengths: %0.1f%%, FIFO start space: %0.1f%%, APB errors: %0.1f%%",
                                 frame_coverage.get_inst_coverage(),
+                                start_coverage.get_inst_coverage(),
                                 error_coverage.get_inst_coverage()), UVM_LOW)
         endfunction
     endclass
@@ -387,6 +460,8 @@ package apb_spi_pkg;
 
         int unsigned random_frames;
         int unsigned random_bytes;
+        virtual apb_if apb_bus;
+        virtual spi_if spi_bus;
 
         function new(string name = "apb_spi_sequence");
             super.new(name);
@@ -421,6 +496,77 @@ package apb_spi_pkg;
                 if (status[1] === 1'b1) return;
             end
             `uvm_fatal("SEQUENCE", "Timed out polling STATUS.DONE")
+        endtask
+
+        task check_read(logic [7:0] addr, logic [31:0] expected);
+            logic [31:0] actual;
+
+            access(0, addr, '0, 0, actual);
+            if (actual !== expected)
+                `uvm_error("SEQUENCE",
+                           $sformatf("Read 0x%02h: expected %08h, got %08h", addr, expected, actual))
+        endtask
+
+        task check_rx_space_retry();
+            logic [31:0] ignored;
+
+            access(1, TXFIFO, 32'h81, 0, ignored);
+            access(1, TXFIFO, 32'h42, 0, ignored);
+            access(1, TXFIFO, 32'h63, 0, ignored);
+            access(1, CTRL, 32'hd, 0, ignored);
+            wait_for_done();
+
+            access(1, TXFIFO, 32'ha5, 0, ignored);
+            access(1, TXFIFO, 32'h3c, 0, ignored);
+            check_read(FIFO_LEVEL, 32'h32);
+            access(1, CTRL, 32'hb, 1, ignored);
+            check_read(FIFO_LEVEL, 32'h32);
+            check_read(STATUS, 32'h2);
+            if (spi_bus.cs_n !== 1'b1)
+                `uvm_error("RX_SPACE", "Rejected START did not leave chip select idle")
+
+            access(0, RXFIFO, '0, 0, ignored);
+            check_read(FIFO_LEVEL, 32'h22);
+            access(1, CTRL, 32'hb, 0, ignored);
+            wait_for_done();
+            check_read(FIFO_LEVEL, 32'h40);
+            access(0, RXDATA, '0, 0, ignored);
+            repeat (4) access(0, RXFIFO, '0, 0, ignored);
+            check_read(FIFO_LEVEL, '0);
+            access(0, RXFIFO, '0, 1, ignored);
+        endtask
+
+        task check_reset_recovery();
+            logic [31:0] ignored;
+
+            access(1, TXDATA, 32'h9b, 0, ignored);
+            access(1, TXFIFO, 32'h11, 0, ignored);
+            access(1, TXFIFO, 32'h22, 0, ignored);
+            access(1, TXFIFO, 32'h33, 0, ignored);
+            access(1, CTRL, 32'hd, 0, ignored);
+            repeat (9) @(posedge spi_bus.sck);
+            check_read(FIFO_LEVEL, 32'h11);
+            if (spi_bus.cs_n !== 1'b0)
+                `uvm_fatal("RESET_RECOVERY", "Expected an active SPI frame before reset")
+
+            // No APB request is outstanding when reset aborts the partially shifted byte.
+            @(negedge apb_bus.pclk);
+            apb_bus.preset_n = 1'b0;
+            repeat (2) @(negedge apb_bus.pclk);
+            if (spi_bus.cs_n !== 1'b1 || spi_bus.sck !== 1'b0)
+                `uvm_error("RESET_RECOVERY", "SPI pins did not return to idle during reset")
+            apb_bus.preset_n = 1'b1;
+
+            check_read(STATUS, '0);
+            check_read(TXDATA, '0);
+            check_read(RXDATA, '0);
+            check_read(FIFO_LEVEL, '0);
+            access(0, RXFIFO, '0, 1, ignored);
+
+            access(1, TXFIFO, 32'h4e, 0, ignored);
+            access(1, CTRL, 32'h9, 0, ignored);
+            drain_frame(1, 1);
+            check_read(FIFO_LEVEL, '0);
         endtask
 
         task drain_frame(input bit use_fifo, input int length);
@@ -476,6 +622,8 @@ package apb_spi_pkg;
                 drain_frame(1, length);
             end
 
+            check_rx_space_retry();
+            check_reset_recovery();
             run_random_frames();
         endtask
     endclass
@@ -502,6 +650,9 @@ package apb_spi_pkg;
             void'(uvm_config_db#(int unsigned)::get(this, "", "random_frames", random_frames));
             if (random_frames > 128)
                 `uvm_fatal("TEST", "random_frames must be between 0 and 128")
+            if (!uvm_config_db#(virtual apb_if)::get(this, "", "apb_bus", stimulus.apb_bus) ||
+                !uvm_config_db#(virtual spi_if)::get(this, "", "spi_bus", stimulus.spi_bus))
+                `uvm_fatal("TEST", "APB or SPI interface was not configured")
             stimulus.random_frames = random_frames;
             stimulus.start(env.apb.sequencer);
             random_bytes = stimulus.random_bytes;
@@ -510,21 +661,23 @@ package apb_spi_pkg;
 
         function void check_phase(uvm_phase phase);
             super.check_phase(phase);
-            if (env.scoreboard.frames_checked != 5 + random_frames ||
-                env.scoreboard.bytes_checked != 11 + random_bytes)
-                `uvm_error("TEST", $sformatf("Expected %0d frames and %0d bytes, observed %0d and %0d",
-                                             5 + random_frames, 11 + random_bytes,
+            if (env.scoreboard.frames_checked != 8 + random_frames ||
+                env.scoreboard.bytes_checked != 18 + random_bytes ||
+                env.scoreboard.frames_aborted != 1)
+                `uvm_error("TEST", $sformatf("Expected %0d frames, %0d bytes and one reset abort; observed %0d, %0d and %0d",
+                                             8 + random_frames, 18 + random_bytes,
                                              env.scoreboard.frames_checked,
-                                             env.scoreboard.bytes_checked))
+                                             env.scoreboard.bytes_checked,
+                                             env.scoreboard.frames_aborted))
         endfunction
 
         function void report_phase(uvm_phase phase);
             uvm_report_server server = uvm_report_server::get_server();
             super.report_phase(phase);
             `uvm_info("TEST_TOTALS",
-                      $sformatf("Checked %0d frames and %0d bytes (%0d randomized frames)",
+                      $sformatf("Checked %0d completed frames and %0d bytes (%0d randomized frames, %0d reset abort)",
                                 env.scoreboard.frames_checked, env.scoreboard.bytes_checked,
-                                random_frames), UVM_LOW)
+                                random_frames, env.scoreboard.frames_aborted), UVM_LOW)
             if (server.get_severity_count(UVM_ERROR) == 0 &&
                 server.get_severity_count(UVM_FATAL) == 0)
                 $display("PASS apb_spi_uvm");

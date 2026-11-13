@@ -11,7 +11,7 @@ module apb_spi_uvm_tb;
     logic [31:0] response_word = SPI_RESPONSE;
 
     apb_if apb_bus(pclk);
-    spi_if spi_bus();
+    spi_if spi_bus(apb_bus.preset_n);
 
     apb_spi dut (
         .pclk      (pclk),

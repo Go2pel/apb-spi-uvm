@@ -12,7 +12,7 @@ interface apb_if (input logic pclk);
     logic        pslverr;
 endinterface
 
-interface spi_if;
+interface spi_if (input logic preset_n);
     logic cs_n;
     logic sck;
     logic mosi;

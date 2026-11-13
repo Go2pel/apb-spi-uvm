@@ -40,16 +40,29 @@ UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
 
 The APB agent drives transactions and independently observes completed transfers. A separate SPI monitor reconstructs MOSI and MISO bytes from the pins. The scoreboard predicts MOSI from accepted APB writes and checks APB receive reads against observed MISO. It also checks frame boundaries, `BUSY` and `DONE`. The sequence checks expected `PSLVERR` responses.
 
-The directed run checks five frames and eleven bytes across register mode and all four FIFO lengths. The runner then repeats the directed tests and adds 24 randomized frames per seed for seeds 1, 17 and 42. Random stimulus varies register or FIFO mode, FIFO length, MOSI payload and MISO response. To reproduce one seed or run only the directed test, use:
+The directed run checks eight completed frames, eighteen observed bytes (including one byte before an abort), and one reset abort. The runner repeats the directed tests and adds 24 randomized frames per seed for seeds 1, 17 and 42. Random stimulus varies register or FIFO mode, FIFO length, MOSI payload and MISO response. To reproduce one seed or run only the directed test, use:
 
 ```sh
 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh 17
 RANDOM_FRAMES=0 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
 ```
 
-A successful run prints `PASS apb_spi_uvm`. Logs and Verilator coverage data go to `build/uvm/`, with one pair of files per run. Functional coverage samples completed frame modes and FIFO lengths, plus APB error responses for a busy start, an inadmissible FIFO start, a full TX FIFO write and an empty RX FIFO read. The reported percentages apply to these bins. The runner compiles with `UVM_NO_DPI`.
+A successful run prints `PASS apb_spi_uvm`. Logs and Verilator coverage data go to `build/uvm/`, with one pair of files per run. The runner compiles with `UVM_NO_DPI`.
 
-Both testbenches instantiate protocol assertions for the APB setup-to-access transition, zero-wait completion, error timing and SPI Mode 0 pin behavior. The UVM run resets before stimulus. The standalone smoke test covers reset during a frame and simultaneous FIFO push and pop.
+| Scenario | Where | What the test checks |
+| --- | --- | --- |
+| Register mode and 1–4 byte FIFO frames | Smoke and UVM | MOSI and RX readback order, frame boundaries, and completion status. The UVM test exercises all four FIFO lengths. |
+| Busy START, insufficient TX data, full TX FIFO and empty RX FIFO | Smoke and UVM | APB error responses and subsequent valid transfers. |
+| Insufficient RX space | Smoke and UVM | Rejected START preserves FIFO levels and prior DONE. |
+| Exact-fit retry with unread RX data | UVM | Reading one old byte makes the retry legal. The scoreboard checks the remaining old bytes followed by the new RX bytes. |
+| Reset during an active frame | Smoke and UVM | SPI pins return to idle and registers and FIFOs clear. The UVM scoreboard discards pending data, counts the abort and checks the first frame after reset. |
+| FIFO pointer wraparound and same-edge RX push/pop | Smoke | FIFO ordering and occupancy across pointer wrap and concurrent operations. |
+
+Both testbenches instantiate protocol assertions for the APB setup-to-access transition, zero-wait completion, error timing and SPI Mode 0 pin behavior. The UVM test requires every defined functional coverage bin to be hit. The bins cover completed frame modes and FIFO lengths, accepted FIFO starts with exact or excess RX space, and five APB error causes. The scoreboard evaluates START using occupancy and busy state at the APB completion edge, before any state updates caused by the transfer.
+
+For a representative run with Verilator 5.054, `RANDOM_FRAMES=128` and seed `99`, the scoreboard checked 136 completed frames, 236 bytes and one reset abort. The run hit all defined functional bins and reported zero UVM errors and fatals. Repeating seed `17` with 24 random frames produced identical coverage data.
+
+To debug a rejected START, first inspect `PSEL`, `PENABLE`, `PREADY` and `PSLVERR` at the APB completion edge. Compare `FIFO_LEVEL` and `STATUS.DONE` before and after the request. On the retry, compare the SPI MOSI bytes with the original TX writes and check that RX reads return the old bytes before the new ones.
 
 For the first exercise, draw the APB write of `TXDATA` and the SPI rising edge that samples bit 7 of `0xa6`. Then trace why the second `START` write produces `PSLVERR` while the first byte still reaches the SPI device.
 
