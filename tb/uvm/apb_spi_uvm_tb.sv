@@ -7,6 +7,8 @@ module apb_spi_uvm_tb;
     localparam logic [31:0] SPI_RESPONSE = 32'hd26cb705;
     logic pclk = 1'b0;
     int unsigned response_index = 0;
+    int unsigned random_frames = 0;
+    logic [31:0] response_word = SPI_RESPONSE;
 
     apb_if apb_bus(pclk);
     spi_if spi_bus();
@@ -28,6 +30,21 @@ module apb_spi_uvm_tb;
         .spi_miso  (spi_bus.miso)
     );
 
+    apb_spi_assertions protocol_checks (
+        .pclk      (pclk),
+        .preset_n  (apb_bus.preset_n),
+        .psel      (apb_bus.psel),
+        .penable   (apb_bus.penable),
+        .pwrite    (apb_bus.pwrite),
+        .paddr     (apb_bus.paddr),
+        .pwdata    (apb_bus.pwdata),
+        .pready    (apb_bus.pready),
+        .pslverr   (apb_bus.pslverr),
+        .spi_cs_n  (spi_bus.cs_n),
+        .spi_sck   (spi_bus.sck),
+        .spi_mosi  (spi_bus.mosi)
+    );
+
     always #5 pclk = !pclk;
 
     // A Mode 0 slave presents its first bit at CS assertion and changes data on SCK falls.
@@ -35,8 +52,14 @@ module apb_spi_uvm_tb;
         if (!apb_bus.preset_n || spi_bus.cs_n) begin
             response_index <= 0;
             spi_bus.miso <= 1'b0;
+        end else if (response_index == 0) begin
+            logic [31:0] next_response;
+            next_response = (random_frames != 0) ? $urandom() : SPI_RESPONSE;
+            response_word <= next_response;
+            spi_bus.miso <= next_response[31];
+            response_index <= 1;
         end else if (response_index < 32) begin
-            spi_bus.miso <= SPI_RESPONSE[31 - response_index];
+            spi_bus.miso <= response_word[31 - response_index];
             response_index <= response_index + 1;
         end
     end
@@ -47,13 +70,15 @@ module apb_spi_uvm_tb;
     end
 
     initial begin
+        void'($value$plusargs("random_frames=%d", random_frames));
         uvm_config_db#(virtual apb_if)::set(null, "*", "apb_bus", apb_bus);
         uvm_config_db#(virtual spi_if)::set(null, "*", "spi_bus", spi_bus);
+        uvm_config_db#(int unsigned)::set(null, "uvm_test_top", "random_frames", random_frames);
         run_test("apb_spi_test");
     end
 
     initial begin
-        #50000;
+        #500000;
         $fatal(1, "UVM testbench watchdog expired");
     end
 endmodule

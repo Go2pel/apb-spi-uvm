@@ -9,7 +9,10 @@ if (-not $VivadoBin) {
 $VivadoBin = (Resolve-Path -LiteralPath $VivadoBin).Path
 $project = Split-Path -Parent $PSScriptRoot
 $build = Join-Path ([System.IO.Path]::GetTempPath()) ('apb-spi-uvm-' + [guid]::NewGuid().ToString('N'))
-$sources = @('rtl/spi_fifo.sv', 'rtl/spi_mode0_frame.sv', 'rtl/apb_spi.sv', 'tb/apb_spi_smoke.sv')
+$sources = @(
+    'rtl/spi_fifo.sv', 'rtl/spi_mode0_frame.sv', 'rtl/apb_spi.sv',
+    'tb/apb_spi_assertions.sv', 'tb/apb_spi_smoke.sv'
+)
 $sourceNames = $sources | ForEach-Object { Split-Path -Leaf $_ }
 
 New-Item -ItemType Directory -Path $build | Out-Null

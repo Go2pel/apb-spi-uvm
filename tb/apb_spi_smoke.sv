@@ -26,6 +26,7 @@ module apb_spi_smoke;
     logic [31:0] read_data;
 
     apb_spi dut (.*);
+    apb_spi_assertions protocol_checks (.*);
 
     always #5 pclk = !pclk;
 

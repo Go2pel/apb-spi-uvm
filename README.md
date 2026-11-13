@@ -32,7 +32,7 @@ The script prints the build and log directory. A successful run ends with `PASS 
 
 ## Run the UVM regression
 
-On Linux or WSL, use Verilator 5.052 or newer and the [Accellera UVM 2020.3.2 reference implementation](https://www.accellera.org/downloads/standards/uvm). Set `UVM_HOME` to the extracted directory that contains `src/uvm_pkg.sv`. The runner uses `verilator` from `PATH` unless `VERILATOR` is set.
+On Linux or WSL, use Verilator 5.054 or newer and the [Accellera UVM 2020.3.2 reference implementation](https://www.accellera.org/downloads/standards/uvm). Set `UVM_HOME` to the extracted directory that contains `src/uvm_pkg.sv`. The runner uses `verilator` from `PATH` unless `VERILATOR` is set.
 
 ```sh
 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
@@ -40,11 +40,16 @@ UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
 
 The APB agent drives transactions and independently observes completed transfers. A separate SPI monitor reconstructs MOSI and MISO bytes from the pins. The scoreboard predicts MOSI from accepted APB writes and checks APB receive reads against observed MISO. It also checks frame boundaries, `BUSY` and `DONE`. The sequence checks expected `PSLVERR` responses.
 
-The directed run checks five frames and eleven bytes across register mode and all four FIFO lengths. A successful run prints `PASS apb_spi_uvm`, with logs in `build/uvm/`. The runner compiles with `UVM_NO_DPI` since the test uses no DPI features. The UVM run resets before stimulus. The standalone smoke test covers reset during a frame and simultaneous FIFO push and pop.
+The directed run checks five frames and eleven bytes across register mode and all four FIFO lengths. The runner then repeats the directed tests and adds 24 randomized frames per seed for seeds 1, 17 and 42. Random stimulus varies register or FIFO mode, FIFO length, MOSI payload and MISO response. To reproduce one seed or run only the directed test, use:
 
-## Next milestone
+```sh
+UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh 17
+RANDOM_FRAMES=0 UVM_HOME=/path/to/1800.2-2020.3.2 bash scripts/run-uvm.sh
+```
 
-Add protocol assertions, seeded regressions and functional coverage.
+A successful run prints `PASS apb_spi_uvm`. Logs and Verilator coverage data go to `build/uvm/`, with one pair of files per run. Functional coverage samples completed frame modes and FIFO lengths, plus APB error responses for a busy start, an inadmissible FIFO start, a full TX FIFO write and an empty RX FIFO read. The reported percentages apply to these bins. The runner compiles with `UVM_NO_DPI`.
+
+Both testbenches instantiate protocol assertions for the APB setup-to-access transition, zero-wait completion, error timing and SPI Mode 0 pin behavior. The UVM run resets before stimulus. The standalone smoke test covers reset during a frame and simultaneous FIFO push and pop.
 
 For the first exercise, draw the APB write of `TXDATA` and the SPI rising edge that samples bit 7 of `0xa6`. Then trace why the second `START` write produces `PSLVERR` while the first byte still reaches the SPI device.
 
